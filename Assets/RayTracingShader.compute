@@ -1,0 +1,162 @@
+#pragma kernel CSMain
+RWTexture2D<float4> Result : register(u0);
+float4x4 _CameraToWorld;
+float4x4 _CameraInverseProjection;
+float4 _DirectionalLight;
+Texture2D<float4> _SkyTex;
+SamplerState sampler_SkyTex;
+float2 _PixelOffset;
+struct Material
+{
+    float3 albedo;
+    float3 specular;
+    float roughness;
+};
+struct sphere{
+    float3 center;
+    float radius;
+    Material mat;
+};
+StructuredBuffer<sphere> _Spheres;
+static const float PI = 3.14159265f;
+struct Ray
+{
+    float3 o;
+    float3 dir;
+    float3 energy;
+};
+Ray CreateRay(float3 origin, float3 direction)
+{
+    Ray ray;
+    ray.o = origin;
+    ray.dir = direction;
+    return ray;
+}
+//CreateCameraRayFunction
+Ray CreateCameraRay(float2 uv)
+{
+    float3 origin = mul(_CameraToWorld, float4(0, 0, 0, 1)).xyz;
+    float3 direction = mul(_CameraInverseProjection, float4(uv, 0, 1)).xyz;
+    direction = mul(_CameraToWorld, float4(direction,0.0)).xyz;
+    direction = normalize(direction);
+    Ray r;
+    r.o = origin;
+    r.dir = direction;
+    r.energy = float3(1.0f, 1.0f, 1.0f);
+    return r;
+}
+
+struct RayHit
+{
+    float3 position;
+    float distance;
+    float3 normal;
+    Material mat;
+};
+RayHit CreateRayHit()
+{
+    RayHit hit;
+    //hit point initialization
+    hit.position = float3(0.0f, 0.0f, 0.0f);
+    hit.distance = 1.#INF;
+    hit.normal = float3(0.0f, 0.0f, 0.0f);
+    //material initialization
+    hit.mat.albedo = float3(0.0f, 0.0f, 0.0f);
+    hit.mat.specular = float3(0.0f, 0.0f, 0.0f);
+    hit.mat.roughness = 0.0f;
+    return hit;
+}
+
+void IntersectGroundPlane(Ray ray, inout RayHit bestHit)
+{
+    // Calculate distance along the ray where the ground plane is intersected
+    float t = -ray.o.y / ray.dir.y;
+    if (t > 0 && t < bestHit.distance)
+    {
+        bestHit.distance = t;
+        bestHit.position = ray.o+ t * ray.dir;
+        bestHit.normal = float3(0.0f, 1.0f, 0.0f);
+        bestHit.mat.albedo = float3(0.8f, 0.8f, 0.8f);
+        bestHit.mat.specular = float3(0.2f, 0.2f, 0.2f);
+    }
+}
+void IntersectSphere(Ray ray, inout RayHit bestHit,sphere s)
+{
+    float3 oc = ray.o - s.center;
+    float a = dot(ray.dir, ray.dir);
+    float b = 2.0f * dot(oc, ray.dir);
+    float c = dot(oc, oc) - s.radius * s.radius;
+    float d = b * b - 4.0f * a * c;
+    if (d > 0.0f)
+    {
+        float t = (-b - sqrt(d)) / (2.0f * a);
+        if (t > 0.0f && t < bestHit.distance)
+        {
+            bestHit.distance = t;
+            bestHit.position = ray.o + t * ray.dir;
+            bestHit.normal = normalize(bestHit.position - s.center);
+            bestHit.mat = s.mat;
+        }
+    }
+}
+RayHit Trace(Ray ray)
+{
+    RayHit bestHit = CreateRayHit();
+    IntersectGroundPlane(ray, bestHit);
+
+    uint numSpheres, stride;
+    _Spheres.GetDimensions(numSpheres, stride);
+    for(uint i=0;i<numSpheres;i++){
+        IntersectSphere(ray, bestHit, _Spheres[i]);
+    }
+    return bestHit;
+}
+float3 Shade(inout Ray ray, RayHit hit)//inout for update ray
+{
+    if (hit.distance < 1.#INF)
+    {
+        // Return the normal
+        ray.dir = reflect(ray.dir, hit.normal);
+        ray.o = hit.position + hit.normal * 0.001f;
+        //in case of self reflection for presicion
+        ray.energy = ray.energy * hit.mat.specular;
+        bool shadow = false;
+        Ray shadowRay = CreateRay(hit.position + hit.normal * 0.001f, -1 * _DirectionalLight.xyz);
+        RayHit shadowHit = Trace(shadowRay);
+        if (shadowHit.distance != 1.#INF)
+        {
+            return float3(0.0f, 0.0f, 0.0f);
+        }
+        
+        return saturate(dot(hit.normal, _DirectionalLight.xyz*-1))
+            *_DirectionalLight.w*hit.mat.albedo;//reflect
+    }
+    else
+    {
+        ray.energy = 0.0f;
+        // Sample the skybox and write it
+        float theta = acos(ray.dir.y) / -PI;
+        float phi = atan2(ray.dir.x, -ray.dir.z) / -PI * 0.5f;
+        return _SkyTex.SampleLevel(sampler_SkyTex, float2(phi, theta), 0).xyz;
+    }
+}
+[numthreads(8,8,1)]
+void CSMain(uint3 id : SV_DISPATCHTHREADID)
+{
+    uint width, height;
+    Result.GetDimensions(width, height);
+    float2 uv = float2((id.xy+_PixelOffset) / float2(width, height) * 2.0f - 1.0f);
+    Ray r = CreateCameraRay(uv);
+    float3 result = float3(0.0,0.0,0.0);
+
+    for(int i=0;i<8;i++){
+        RayHit hit = Trace(r);
+        float3 irradiance = r.energy;
+        float3 c = Shade(r, hit);//brdf
+        result += irradiance * c;
+        if(!any(r.energy))break;
+    }
+
+    Result[id.xy] = float4(result, 1.0f);
+
+}
