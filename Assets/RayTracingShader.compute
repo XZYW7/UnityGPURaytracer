@@ -238,7 +238,7 @@ float3 Shade(inout Ray ray, RayHit hit)//inout for update ray
         // Sample the skybox and write it
         float theta = acos(ray.dir.y) / -PI;
         float phi = atan2(ray.dir.x, -ray.dir.z) / -PI * 0.5f;
-        return float3(1.0,1.0,1.0);//_SkyTex.SampleLevel(sampler_SkyTex, float2(phi, theta), 0).xyz;
+        return _SkyTex.SampleLevel(sampler_SkyTex, float2(phi, theta), 0).xyz;
     }
 }
 

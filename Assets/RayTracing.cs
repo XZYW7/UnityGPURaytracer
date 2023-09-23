@@ -159,11 +159,12 @@ public class RayTracing : MonoBehaviour
             sphere.metallic = Random.value;
 
             sphere.roughness = Random.value;
-            sphere.emission = sphere.albedo * Random.value;
+            float t = Random.value;
+            sphere.emission = sphere.albedo * Mathf.Pow(t,10)* 5;
             spheres.Add(sphere);
         }
         int stride = System.Runtime.InteropServices.Marshal.SizeOf(typeof(Sphere));
-        Debug.Log(stride);
+        //Debug.Log(stride);
         _sphereBuffer = new ComputeBuffer(spheres.Count, stride);
         _sphereBuffer.SetData(spheres);
     }
