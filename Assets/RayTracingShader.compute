@@ -21,6 +21,17 @@ struct sphere{
     Material mat;
 };
 StructuredBuffer<sphere> _Spheres;
+struct MeshObject
+{
+    float4x4 localToWorldMatrix;
+    int indices_offset;
+    int indices_count;
+    Material mat;
+};
+StructuredBuffer<MeshObject> _MeshObjects;
+StructuredBuffer<float3> _Vertices;
+StructuredBuffer<int> _Indices;
+
 static const float PI = 3.14159265f;
 struct Ray
 {
@@ -70,7 +81,37 @@ RayHit CreateRayHit()
     hit.mat.emission = float3(0.0f, 0.0f, 0.0f);
     return hit;
 }
-
+static const float EPSILON = 1e-8;
+bool IntersectTriangle_MT97(Ray ray, float3 vert0, float3 vert1, float3 vert2,
+    inout float t, inout float u, inout float v)
+{
+    // find vectors for two edges sharing vert0
+    float3 edge1 = vert1 - vert0;
+    float3 edge2 = vert2 - vert0;
+    // begin calculating determinant - also used to calculate U parameter
+    float3 pvec = cross(ray.dir, edge2);
+    // if determinant is near zero, ray lies in plane of triangle
+    float det = dot(edge1, pvec);
+    // use backface culling
+    if (det < EPSILON)
+        return false;
+    float inv_det = 1.0f / det;
+    // calculate distance from vert0 to ray origin
+    float3 tvec = ray.o - vert0;
+    // calculate U parameter and test bounds
+    u = dot(tvec, pvec) * inv_det;
+    if (u < 0.0 || u > 1.0f)
+        return false;
+    // prepare to test V parameter
+    float3 qvec = cross(tvec, edge1);
+    // calculate V parameter and test bounds
+    v = dot(ray.dir, qvec) * inv_det;
+    if (v < 0.0 || u + v > 1.0f)
+        return false;
+    // calculate t, ray intersects triangle
+    t = dot(edge2, qvec) * inv_det;
+    return true;
+}
 void IntersectGroundPlane(Ray ray, inout RayHit bestHit)
 {
     // Calculate distance along the ray where the ground plane is intersected
@@ -104,6 +145,29 @@ void IntersectSphere(Ray ray, inout RayHit bestHit,sphere s)
         }
     }
 }
+void IntersectMeshObject(Ray ray, inout RayHit bestHit, MeshObject meshObject)
+{
+    uint offset = meshObject.indices_offset;
+    uint count = offset + meshObject.indices_count;
+    for (uint i = offset; i < count; i += 3)
+    {
+        float3 v0 = (mul(meshObject.localToWorldMatrix, float4(_Vertices[_Indices[i]], 1))).xyz;
+        float3 v1 = (mul(meshObject.localToWorldMatrix, float4(_Vertices[_Indices[i + 1]], 1))).xyz;
+        float3 v2 = (mul(meshObject.localToWorldMatrix, float4(_Vertices[_Indices[i + 2]], 1))).xyz;
+        float t, u, v;
+        if (IntersectTriangle_MT97(ray, v0, v1, v2, t, u, v))
+        {
+            if (t > 0 && t < bestHit.distance)
+            {
+                bestHit.distance = t;
+                bestHit.position = ray.o + t * ray.dir;
+                bestHit.normal = normalize(cross(v1 - v0, v2 - v0));
+                if(dot(bestHit.normal,ray.dir)>0.0f)bestHit.normal = -bestHit.normal;
+                bestHit.mat = meshObject.mat;
+            }
+        }
+    }
+}
 RayHit Trace(Ray ray)
 {
     RayHit bestHit = CreateRayHit();
@@ -113,6 +177,14 @@ RayHit Trace(Ray ray)
     _Spheres.GetDimensions(numSpheres, stride);
     for(uint i=0;i<numSpheres;i++){
         IntersectSphere(ray, bestHit, _Spheres[i]);
+    }
+    //// Trace single triangle
+    // Trace mesh objects
+    uint count;
+    _MeshObjects.GetDimensions(count, stride);
+    for (i = 0; i < count; i++)
+    {
+        IntersectMeshObject(ray, bestHit, _MeshObjects[i]);
     }
     return bestHit;
 }
@@ -134,7 +206,7 @@ float3x3 GetTangentSpace(float3 normal)
 {
     // Choose a helper vector for the cross product
     float3 helper = float3(1, 0, 0);
-    if (abs(normal.x-helper.x) < 0.001f)
+    if (abs(normal.x) > 0.99f)
         helper = float3(0, 0, 1);
     // Generate vectors
     float3 tangent = normalize(cross(normal, helper));
@@ -225,11 +297,11 @@ float3 Shade(inout Ray ray, RayHit hit)//inout for update ray
         float G = GeometrySmith(N, V, L, roughness); 
         float3 ks = F;
         float3 kd = (1.0f - ks) * (1.0f - hit.mat.metallic);
-        float3 brdf = F * (VoH * G)/(NoV * NoH) + hit.mat.albedo *NoL;
+        float3 brdf = F * (VoH * G)/(NoV * NoH) *ks+ kd*hit.mat.albedo *NoL;
         //
         ray.energy *= brdf;
 
-        return hit.mat.emission;
+        return hit.mat.emission;;//
 
     }
     else
@@ -261,7 +333,7 @@ void CSMain(uint3 id : SV_DISPATCHTHREADID)
         float3 transport = r.energy;
         float3 c = Shade(r, hit);//brdf
         result += transport* c;
-        if(abs(_PixelOffset.x-0.5)<0.00001 ){
+        if(abs(_PixelOffset.x-0.5)<0.00001){
             //break;
         }
         if(!any(r.energy))break;
