@@ -7,6 +7,7 @@ public class RayTracing : MonoBehaviour
 {
     public ComputeShader RayTracingShader;
     private RenderTexture _target;
+    private RenderTexture _converged;//to preserve high precision result
     public Texture SkyTex;
     public Light DirectionalLight;
 
@@ -22,6 +23,7 @@ public class RayTracing : MonoBehaviour
     public uint SpheresMax = 100;
     public float SpherePlacementRadius = 100.0f;
     private ComputeBuffer _sphereBuffer;
+    [Range(0,10000)]public int SphereSeed;
     void OnEnable()
     {
         _currentSample = 0;
@@ -70,7 +72,8 @@ public class RayTracing : MonoBehaviour
             if (_addMaterial == null)
                 _addMaterial = new Material(Shader.Find("Hidden/AddSample"));
             _addMaterial.SetFloat("_samples", _currentSample);
-            Graphics.Blit(_target, dest, _addMaterial);
+            Graphics.Blit(_target, _converged, _addMaterial);
+            Graphics.Blit(_converged, dest);
             _currentSample++;
         }else {
             Graphics.Blit(_target, dest);
@@ -87,6 +90,14 @@ public class RayTracing : MonoBehaviour
             _target = new RenderTexture(Screen.width, Screen.height, 0, RenderTextureFormat.ARGBFloat, RenderTextureReadWrite.Linear);
             _target.enableRandomWrite = true;
             _target.Create();
+        }
+        if(_converged == null ||_converged.width!=Screen.width ||_converged.height != Screen.height){
+            if(_converged!=null){
+                _converged.Release();
+            }
+            _converged = new RenderTexture(Screen.width, Screen.height, 0, RenderTextureFormat.ARGBFloat, RenderTextureReadWrite.Linear);
+            _converged.enableRandomWrite = true;
+            _converged.Create();
         }
 
     }
@@ -105,6 +116,8 @@ public class RayTracing : MonoBehaviour
         Vector3 l = DirectionalLight.transform.forward;
         RayTracingShader.SetVector("_DirectionalLight", new Vector4(l.x, l.y, l.z, DirectionalLight.intensity));
         RayTracingShader.SetBuffer(0, "_Spheres", _sphereBuffer);
+        RayTracingShader.SetVector("_Time", new Vector4(Time.time, Time.deltaTime, 0.0f, 0.0f));
+        RayTracingShader.SetFloat("_Seed", Random.value);
     }
  
     struct Sphere
@@ -112,11 +125,13 @@ public class RayTracing : MonoBehaviour
         public Vector3 center;
         public float radius;
         public Vector3 albedo;
-        public Vector3 specular;
+        public float metallic;
         public float roughness;
+        public Vector3 emission;
     };
     private void SetUpScene()
     {
+        Random.InitState(SphereSeed);
         List<Sphere> spheres = new List<Sphere>();
         for (int i = 0; i < SpheresMax; i++)
         {
@@ -139,18 +154,12 @@ public class RayTracing : MonoBehaviour
                 continue;
             }
             Color color = Random.ColorHSV();
-            bool metal = Random.value < 0.5f;
-            if (metal)
-            {
-                sphere.albedo = Vector3.zero;
-                sphere.specular = new Vector3(color.r, color.g, color.b);
-            }
-            else
-            {
-                sphere.albedo = new Vector3(color.r, color.g, color.b);
-                sphere.specular = Vector3.one * 0.04f;
-            }
+
+            sphere.albedo = new Vector3(color.r, color.g, color.b);//Vector3.zero;
+            sphere.metallic = Random.value;
+
             sphere.roughness = Random.value;
+            sphere.emission = sphere.albedo * Random.value;
             spheres.Add(sphere);
         }
         int stride = System.Runtime.InteropServices.Marshal.SizeOf(typeof(Sphere));

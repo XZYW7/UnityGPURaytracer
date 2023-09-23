@@ -6,11 +6,14 @@ float4 _DirectionalLight;
 Texture2D<float4> _SkyTex;
 SamplerState sampler_SkyTex;
 float2 _PixelOffset;
+float4 _Time;
+
 struct Material
 {
     float3 albedo;
-    float3 specular;
+    float metallic;
     float roughness;
+    float3 emission;
 };
 struct sphere{
     float3 center;
@@ -62,8 +65,9 @@ RayHit CreateRayHit()
     hit.normal = float3(0.0f, 0.0f, 0.0f);
     //material initialization
     hit.mat.albedo = float3(0.0f, 0.0f, 0.0f);
-    hit.mat.specular = float3(0.0f, 0.0f, 0.0f);
+    hit.mat.metallic = 0.0f;
     hit.mat.roughness = 0.0f;
+    hit.mat.emission = float3(0.0f, 0.0f, 0.0f);
     return hit;
 }
 
@@ -76,8 +80,9 @@ void IntersectGroundPlane(Ray ray, inout RayHit bestHit)
         bestHit.distance = t;
         bestHit.position = ray.o+ t * ray.dir;
         bestHit.normal = float3(0.0f, 1.0f, 0.0f);
-        bestHit.mat.albedo = float3(0.8f, 0.8f, 0.8f);
-        bestHit.mat.specular = float3(0.2f, 0.2f, 0.2f);
+        bestHit.mat.albedo = float3(1.0f, 1.0f, 1.0f);
+        bestHit.mat.metallic = 0.0f;
+        bestHit.mat.roughness = 1.0f;
     }
 }
 void IntersectSphere(Ray ray, inout RayHit bestHit,sphere s)
@@ -111,25 +116,121 @@ RayHit Trace(Ray ray)
     }
     return bestHit;
 }
+float sdot(float3 x, float3 y, float f = 1.0f)
+{
+    return saturate(dot(x, y) * f);
+}
+
+float2 _Pixel;
+float _Seed;
+float rand()
+{
+    //float _Seed =  frac(_Time.x);
+    float result = frac(sin(_Seed / 100.0f * dot(_Pixel, float2(12.9898f, 78.233f))) * 43758.5453f);
+    _Seed += 1.0f;
+    return result;
+}
+float3x3 GetTangentSpace(float3 normal)
+{
+    // Choose a helper vector for the cross product
+    float3 helper = float3(1, 0, 0);
+    if (abs(normal.x-helper.x) < 0.001f)
+        helper = float3(0, 0, 1);
+    // Generate vectors
+    float3 tangent = normalize(cross(normal, helper));
+    float3 binormal = normalize(cross(normal, tangent));
+    return float3x3(tangent, binormal, normal);
+}
+float3 SampleHemisphere(float3 normal)
+{
+    // Uniformly sample hemisphere direction
+    float cosTheta = rand();
+    float sinTheta = sqrt(max(0.0f, 1.0f - cosTheta * cosTheta));
+    float phi = 2 * PI * rand();
+    float3 tangentSpaceDir = float3(cos(phi) * sinTheta, sin(phi) * sinTheta, cosTheta);
+    // Transform direction to world space
+    return mul(tangentSpaceDir,GetTangentSpace(normal));
+}
+float3 SampleHemisphere_ISGGX(float3 normal, float roughness)
+{
+    // Sample the hemisphere, where alpha determines the kind of the sampling
+    float xi1 = rand();
+    float a = roughness * roughness;
+    float cosTheta = sqrt((1.0 - xi1) / (1.0 + (a*a - 1.0) * xi1));
+    float sinTheta = sqrt(max(0.0f, 1.0f - cosTheta * cosTheta));
+    float phi = 2 * PI * rand();
+    float3 tangentSpaceDir = float3(cos(phi) * sinTheta, sin(phi) * sinTheta, cosTheta);
+    // Transform direction to world space
+    return mul(tangentSpaceDir, GetTangentSpace(normal));
+}
+float3 fresnelSchlick(float cosTheta, float3 F0)
+{
+    return F0 + (1.0- F0) * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0);
+}  
+
+float DistributionGGX(float3 N, float3 H, float roughness)
+{
+    float a      = roughness*roughness;
+    float a2     = a*a;
+    float NdotH  = max(dot(N, H), 0.0);
+    float NdotH2 = NdotH*NdotH;
+
+    float num   = a2;
+    float denom = (NdotH2 * (a2 - 1.0) + 1.0);
+    denom = PI * denom * denom;
+
+    return num / denom;
+}
+
+float GeometrySchlickGGX(float NdotV, float roughness)
+{
+    float a = roughness;
+    float k = (a * a) / 2.0f;
+
+    float num   = NdotV;
+    float denom = NdotV * (1.0 - k) + k;
+
+    return num / denom;
+}
+float GeometrySmith(float3 N, float3 V, float3 L, float roughness)
+{
+    float NdotV = max(dot(N, V), 0.0);
+    float NdotL = max(dot(N, L), 0.0);
+    float ggx2  = GeometrySchlickGGX(NdotV, roughness);
+    float ggx1  = GeometrySchlickGGX(NdotL, roughness);
+
+    return ggx1 * ggx2;
+}
 float3 Shade(inout Ray ray, RayHit hit)//inout for update ray
 {
     if (hit.distance < 1.#INF)
     {
-        // Return the normal
-        ray.dir = reflect(ray.dir, hit.normal);
         ray.o = hit.position + hit.normal * 0.001f;
-        //in case of self reflection for presicion
-        ray.energy = ray.energy * hit.mat.specular;
-        bool shadow = false;
-        Ray shadowRay = CreateRay(hit.position + hit.normal * 0.001f, -1 * _DirectionalLight.xyz);
-        RayHit shadowHit = Trace(shadowRay);
-        if (shadowHit.distance != 1.#INF)
-        {
-            return float3(0.0f, 0.0f, 0.0f);
-        }
+        float3 N = hit.normal;
+        float3 V = -ray.dir;//L_o        
+        float roughness = hit.mat.roughness;
+        float3 H = SampleHemisphere_ISGGX(N, roughness);
+        float VoH = sdot(V, H);
+        ray.dir = normalize(H * 2.0f * dot(V, H) - V);
+        float3 L = ray.dir;
         
-        return saturate(dot(hit.normal, _DirectionalLight.xyz*-1))
-            *_DirectionalLight.w*hit.mat.albedo;//reflect
+        float NoV = sdot(N, V);
+        float NoL = sdot(N, L);
+        float NoH = sdot(N, H);
+
+       
+        float3 F0 = float3(0.04,0.04,0.04);
+        F0 = lerp(F0, hit.mat.albedo,hit.mat.metallic); 
+        float3 F  = fresnelSchlick(VoH, F0);
+        float G = GeometrySmith(N, V, L, roughness); 
+        float3 ks = F;
+        float3 kd = (1.0f - ks) * (1.0f - hit.mat.metallic);
+        float3 brdf = F * (VoH * G)/(NoV * NoH) + hit.mat.albedo *NoL;
+        //
+        ray.energy *= brdf;
+
+        return hit.mat.emission;
+
     }
     else
     {
@@ -137,26 +238,35 @@ float3 Shade(inout Ray ray, RayHit hit)//inout for update ray
         // Sample the skybox and write it
         float theta = acos(ray.dir.y) / -PI;
         float phi = atan2(ray.dir.x, -ray.dir.z) / -PI * 0.5f;
-        return _SkyTex.SampleLevel(sampler_SkyTex, float2(phi, theta), 0).xyz;
+        return float3(1.0,1.0,1.0);//_SkyTex.SampleLevel(sampler_SkyTex, float2(phi, theta), 0).xyz;
     }
 }
+
+
+
+
 [numthreads(8,8,1)]
 void CSMain(uint3 id : SV_DISPATCHTHREADID)
 {
+    _Pixel = id.xy;
     uint width, height;
     Result.GetDimensions(width, height);
     float2 uv = float2((id.xy+_PixelOffset) / float2(width, height) * 2.0f - 1.0f);
+
     Ray r = CreateCameraRay(uv);
     float3 result = float3(0.0,0.0,0.0);
-
+    //float random = rand();
     for(int i=0;i<8;i++){
         RayHit hit = Trace(r);
-        float3 irradiance = r.energy;
+        float3 transport = r.energy;
         float3 c = Shade(r, hit);//brdf
-        result += irradiance * c;
+        result += transport* c;
+        if(abs(_PixelOffset.x-0.5)<0.00001 ){
+            //break;
+        }
         if(!any(r.energy))break;
     }
-
+    result *= _DirectionalLight.w;
     Result[id.xy] = float4(result, 1.0f);
 
 }
